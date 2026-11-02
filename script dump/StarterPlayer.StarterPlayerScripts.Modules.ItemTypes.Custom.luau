@@ -1,0 +1,21 @@
+local ClientItem_m = require(
+    game:GetService("Players").LocalPlayer.PlayerScripts.Modules.ClientReplicatedClasses.ClientFighter.ClientItem
+)
+local t = setmetatable({}, ClientItem_m)
+t.__index = t
+
+function t.new(...) -- line: 8
+    -- upvalues:
+    --  [1] ClientItem_m (copy)
+    --  [2] t (copy)
+
+    local t_1 = setmetatable(ClientItem_m.new(...), t)
+    t_1:_Init()
+
+    return t_1
+end
+
+function t._Init(_) -- line: 26
+end
+
+return t

@@ -1,0 +1,37 @@
+return function(arg1, arg2, arg3) -- line: 1
+    if not arg1:_AnimationWait(script.Name, arg3, 0.4 / arg2) then
+        return
+    end
+
+    arg1:CreateSound(
+        "rbxassetid://17247639614",
+        0.25,
+        1 + 0.05 * math.random(),
+        true,
+        10
+    )
+
+    if not arg1:_AnimationWait(script.Name, arg3, 1.6 / arg2) then
+        return
+    end
+
+    arg1:CreateSound(
+        "rbxassetid://17247639272",
+        0.2,
+        0.95 + 0.05 * math.random(),
+        true,
+        10
+    )
+
+    if not arg1:_AnimationWait(script.Name, arg3, 3.1 / arg2) then
+        return
+    end
+
+    arg1:CreateSound(
+        "rbxassetid://17247639272",
+        0.15,
+        0.9 + 0.05 * math.random(),
+        true,
+        10
+    )
+end
