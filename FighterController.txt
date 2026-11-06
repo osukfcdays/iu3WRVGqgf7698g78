@@ -1,0 +1,419 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
+
+game:GetService("RunService")
+
+local Players = game:GetService("Players")
+
+require(ReplicatedStorage.Modules.CONSTANTS)
+
+local EnumLibrary = require(ReplicatedStorage.Modules.EnumLibrary)
+local Utility = require(ReplicatedStorage.Modules.Utility)
+
+require(Players.LocalPlayer.PlayerScripts.Controllers.PlayerDataController)
+
+local ControlsController = require(Players.LocalPlayer.PlayerScripts.Controllers.ControlsController)
+local CameraController = require(Players.LocalPlayer.PlayerScripts.Controllers.CameraController)
+local ReplicatedController = require(Players.LocalPlayer.PlayerScripts.Modules.ReplicatedController)
+local DefaultCharacter = Players.LocalPlayer.PlayerScripts.Assets:WaitForChild("Misc"):WaitForChild("DefaultCharacter")
+local self = setmetatable({}, ReplicatedController)
+
+self.__index = self
+
+function self._new() -- line: 20
+    -- upvalues: ReplicatedController (copy), self (copy)
+    local v2 = setmetatable(ReplicatedController.new("Fighter"), self)
+
+    v2.LocalFighter = nil
+    v2._network_id_map = {}
+    v2._last_connection_level = nil
+    v2._player_to_fighter = {}
+    v2._model_to_fighter = {}
+    v2._last_controls_replicated_time = 0
+    v2._character_model_cache = {}
+    v2:_Init()
+
+    return v2
+end
+
+function self.GetFighter(p1, p2) -- line: 42
+    -- upvalues: Players (copy)
+    local v3 = p1._player_to_fighter[p2] or p1._model_to_fighter[p2]
+
+    if v3 then
+        return v3
+    end
+
+    if not p2 then
+        return
+    end
+
+    if typeof(p2) == "Instance" then
+        if not p2:IsA("Player") then
+            return p1:GetFighter(Players:GetPlayerFromCharacter(p2))
+        end
+
+        for v4, v5 in pairs(p1.Objects) do
+            if v5.Player == p2 then
+                return v5, v4
+            end
+        end
+
+        return nil
+    end
+
+    if typeof(p2) == "number" then
+        return p1:GetFighter(Players:GetPlayerByUserId(p2))
+    end
+
+    assert(false, "Argument 1 invalid, expected a Player or a Model or nil, got " .. tostring(p2) .. " (type: " .. (typeof(p2) == "Instance" and p2.ClassName or typeof(p2)) .. ")")
+end
+
+function self.GetFighterFromNetworkID(p3, p4) -- line: 72
+    return p3._network_id_map[p4]
+end
+
+function self.GetFightersNotInDuel(p5) -- line: 76
+    local t2 = {}
+
+    for _, v7 in pairs(p5.Objects) do
+        if not v7:Get("IsInDuel") then
+            table.insert(t2, v7)
+        end
+    end
+
+    return t2
+end
+
+function self.GetEntities(p6) -- line: 88
+    local t3 = {}
+
+    for _, v8 in pairs(p6.Objects) do
+        if v8.Entity then
+            table.insert(t3, v8.Entity)
+        end
+    end
+
+    return t3
+end
+
+function self.GetFighterModels(p7, p8) -- line: 102
+    local t4 = {}
+
+    for _, v9 in pairs(p7.Objects) do
+        if v9.Entity and (not p8 or not v9.IsLocalPlayer) then
+            table.insert(t4, v9.Entity.Model)
+        end
+    end
+
+    return t4
+end
+
+function self.GetWrap(p9, p10) -- line: 116
+    for _, v10 in pairs(p9.Objects) do
+        local Item = v10:GetItem(p10)
+
+        if Item then
+            return Item:GetWrap()
+        end
+    end
+end
+
+function self.WaitForFighter(p11, ...) -- line: 127
+    local Fighter
+
+    while true do
+        Fighter = p11:GetFighter(...)
+
+        if Fighter then
+            break
+        end
+
+        p11.ObjectAdded:Wait()
+    end
+
+    return Fighter
+end
+
+function self.WaitForLocalFighter(p12) -- line: 139
+    -- upvalues: Players (copy)
+    return p12:WaitForFighter(Players.LocalPlayer)
+end
+
+function self.GenerateCharacterModel(p13, p14, p15) -- line: 143
+    -- upvalues: Players (copy), DefaultCharacter (copy)
+    if p13._character_model_cache[tostring(p14)] then
+        return p13._character_model_cache[tostring(p14)]
+    end
+
+    local function generate() -- line: 148
+        -- upvalues: p13 (copy), p14 (copy), Players (copy)
+        local GetHumanoidDescriptionFromUserIdAsync = Players.GetHumanoidDescriptionFromUserIdAsync
+        local ok, result = pcall(GetHumanoidDescriptionFromUserIdAsync, Players, p14)
+
+        if not ok then
+            warn("Failed to fetch humanoid description:", result)
+
+            return
+        end
+
+        result.Torso = 15365012259
+        result.LeftArm = 15365010034
+        result.RightArm = 15365012263
+        result.LeftLeg = 15365010038
+        result.RightLeg = 15365010030
+
+        local CreateHumanoidModelFromDescriptionAsync = Players.CreateHumanoidModelFromDescriptionAsync
+        local R15 = Enum.HumanoidRigType.R15
+        local ok2, result2 = pcall(CreateHumanoidModelFromDescriptionAsync, Players, result, R15)
+
+        if ok2 then
+            p13._preloaded_character_model = result2
+
+            local t5 = {
+                Template = result2
+            }
+
+            p13._character_model_cache[tostring(p14)] = t5
+
+            return t5
+        end
+
+        warn("Failed to create humanoid model:", result2)
+    end
+
+    if p15 then
+        return generate()
+    end
+
+    task.spawn(generate)
+
+    return p13._character_model_cache[tostring(p14)] or {
+        Template = DefaultCharacter
+    }
+end
+
+function self._VerifyEntityLoop(p16) -- line: 197
+    -- upvalues: ReplicatedStorage (copy), Players (copy)
+    local function is_inaccurate() -- line: 198
+        -- upvalues: p16 (copy), Players (copy)
+        return not p16.LocalFighter:Get("IsInDuel") and not p16.LocalFighter:Get("IsInShootingRange") and Players.LocalPlayer.Character and (not p16.LocalFighter.Entity or p16.LocalFighter.Entity.Model ~= Players.LocalPlayer.Character)
+    end
+
+    while wait(1) do
+        if is_inaccurate() then
+            wait(2)
+
+            if is_inaccurate() then
+                ReplicatedStorage.Remotes.Replication.Fighter.VerifyClientEntity:FireServer()
+                wait(10)
+            end
+        end
+    end
+end
+
+function self._ConnectionLevelReplicationLoop(p17) -- line: 214
+    -- upvalues: ReplicatedStorage (copy), Utility (copy)
+    while true do
+        wait(1)
+
+        if p17.LocalFighter and p17.LocalFighter:Get("IsInDuel") then
+            local ConnectionLevel = Utility:GetConnectionLevel((Utility:GetLocalConnectionPing()))
+
+            if ConnectionLevel ~= p17._last_connection_level then
+                p17._last_connection_level = ConnectionLevel
+                ReplicatedStorage.Remotes.Replication.Fighter.UpdateConnectionLevel:FireServer(ConnectionLevel)
+            end
+        end
+    end
+end
+
+function self._UpdateNetworkIDMap(p18) -- line: 234
+    p18._network_id_map = {}
+
+    for _, v11 in pairs(p18.Objects) do
+        local DecodedNetworkID = v11:Get("DecodedNetworkID")
+
+        if DecodedNetworkID then
+            p18._network_id_map[DecodedNetworkID] = v11
+        end
+    end
+end
+
+function self._FighterAdded(p19, p20) -- line: 246
+    p20:GetDataChangedSignal("DecodedNetworkID"):Connect(function() -- line: 247
+        -- upvalues: p19 (copy)
+        p19:_UpdateNetworkIDMap()
+    end)
+    p20.EntityAdded:Connect(function(p21) -- line: 251
+        -- upvalues: p19 (copy), p20 (copy)
+        p19._model_to_fighter[p21.Model] = p20
+    end)
+    p20.EntityRemoved:Connect(function(_) -- line: 255
+        -- upvalues: p19 (copy), p20 (copy)
+        for v12, v13 in pairs(p19._model_to_fighter) do
+            if v13 == p20 then
+                p19._model_to_fighter[v12] = nil
+            end
+        end
+    end)
+
+    if p20.Entity and p20.Entity.Model then
+        p19._model_to_fighter[p20.Entity.Model] = p20
+    end
+
+    p19._player_to_fighter[p20.Player] = p20
+    p19:_UpdateNetworkIDMap()
+end
+
+function self._ReplicateControls(p23) -- line: 271
+    -- upvalues: ReplicatedStorage (copy), ControlsController (copy)
+    if p23.LocalFighter then
+        local v15 = math.max(0.2 - (tick() - p23._last_controls_replicated_time), 0.2)
+
+        task.delay(v15, function() -- line: 279
+            -- upvalues: ReplicatedStorage (copy), ControlsController (copy)
+            if typeof(ControlsController.CurrentControls) == "string" then
+                ReplicatedStorage.Remotes.Replication.Fighter.SetControls:FireServer(ControlsController.CurrentControls)
+            end
+        end)
+    end
+end
+
+function self._CameraReplicationLoop(p24) -- line: 286
+    -- upvalues: ReplicatedStorage (copy), Utility (copy), CameraController (copy)
+    local function send(p25) -- line: 287
+        -- upvalues: ReplicatedStorage (copy)
+        if not p25 or utf8.len(p25) then
+            ReplicatedStorage.Remotes.Replication.Fighter.UpdateCameraRotation:FireServer(p25, nil)
+        end
+    end
+
+    local v16 = false
+    local v17
+
+    while true do
+        wait(0.1)
+
+        if p24.LocalFighter and p24.LocalFighter:Get("IsSpectating") and CameraController:GetPublicState() then
+            local v18 = Utility:EncodeCameraRotation(CameraController.Rotation)
+
+            if v16 or v18 ~= v17 then
+                task.defer(send, v18)
+            end
+
+            v16 = false
+            v17 = v18
+            continue
+        end
+
+        if not v16 then
+            v16 = true
+            task.defer(send, Utility:EncodeCameraRotation(Vector2.zero))
+        end
+    end
+end
+
+function self._HookLocalFighter(p26) -- line: 317
+    -- upvalues: ReplicatedStorage (copy), StarterGui (copy), CameraController (copy)
+    p26.LocalFighter = p26:WaitForLocalFighter()
+
+    local function update_third_person_overide() -- line: 320
+        -- upvalues: p26 (copy), CameraController (copy)
+        CameraController:SetThirdPersonOverride(p26.LocalFighter:Get("ThirdPersonOverride"))
+    end
+
+    p26.LocalFighter:GetDataChangedSignal("ThirdPersonOverride"):Connect(update_third_person_overide)
+    task.defer(update_third_person_overide)
+
+    local n1 = 0
+    local BindableEvent = Instance.new("BindableEvent")
+
+    BindableEvent.Event:Connect(function() -- line: 330
+        -- upvalues: ReplicatedStorage (copy)
+        ReplicatedStorage.Remotes.Replication.Fighter.ResetCharacter:FireServer()
+    end)
+
+    local function update_reset_button() -- line: 334
+        -- upvalues: p26 (copy), n1 (ref), BindableEvent (copy), StarterGui (copy)
+        n1 += 1
+
+        local v19 = n1
+
+        while n1 == v19 do
+            local SetCore = StarterGui.SetCore
+            local v20 = not p26.LocalFighter:Get("IsInDuel") and BindableEvent
+            local ok, result = pcall(SetCore, StarterGui, "ResetButtonCallback", v20)
+
+            if ok then
+                break
+            end
+
+            warn("Failed to set reset button callback", result)
+            wait(0.1)
+        end
+    end
+
+    p26.LocalFighter:GetDataChangedSignal("IsInDuel"):Connect(update_reset_button)
+    task.defer(update_reset_button)
+    p26:_ReplicateControls()
+    task.defer(p26._CameraReplicationLoop, p26)
+    task.defer(p26._ConnectionLevelReplicationLoop, p26)
+    task.defer(p26._VerifyEntityLoop, p26)
+end
+
+function self._Setup(p27) -- line: 360
+    -- upvalues: Players (copy), EnumLibrary (copy)
+    p27._reject_object_added_serial_callback = function(p28) -- line: 361
+        -- upvalues: Players (copy), EnumLibrary (copy)
+        return not p28[EnumLibrary:ToEnum("Player")] and not Players:GetPlayerByUserId(p28[EnumLibrary:ToEnum("UserID")])
+    end
+end
+
+function self._Init(p29) -- line: 366
+    -- upvalues: ReplicatedStorage (copy), Utility (copy), ControlsController (copy)
+    p29.ObjectAdded:Connect(function(p30) -- line: 367
+        -- upvalues: p29 (copy)
+        p29:_FighterAdded(p30)
+    end)
+    p29.ObjectRemoved:Connect(function(p31) -- line: 371
+        -- upvalues: p29 (copy)
+        for v21, v22 in pairs(p29._player_to_fighter) do
+            if v22 == p31 then
+                p29._model_to_fighter[v21] = nil
+            end
+        end
+
+        for v23, v24 in pairs(p29._model_to_fighter) do
+            if v24 == p31 then
+                p29._model_to_fighter[v23] = nil
+            end
+        end
+    end)
+    ControlsController.ControlsChanged:Connect(function() -- line: 385
+        -- upvalues: p29 (copy)
+        p29:_ReplicateControls()
+    end)
+    ReplicatedStorage.Remotes.Replication.Fighter.UpdateCameraRotations.OnClientEvent:Connect(function(p32) -- line: 389
+        -- upvalues: p29 (copy), Utility (copy)
+        local v25 = Utility:DecodeCameraRotationBulk(p32)
+
+        for _, v26 in pairs(v25) do
+            local v27, v28, v29 = table.unpack(v26)
+            local FighterFromNetworkID = p29:GetFighterFromNetworkID(v27)
+
+            if FighterFromNetworkID then
+                FighterFromNetworkID:SetReplicate("CameraRotation", Utility:FromXYToCameraRotation(v28, v29))
+            end
+        end
+    end)
+
+    for _, v30 in pairs(p29.Objects) do
+        task.spawn(p29._FighterAdded, p29, v30)
+    end
+
+    p29:_Setup()
+    task.defer(p29._HookLocalFighter, p29)
+end
+
+return self._new()

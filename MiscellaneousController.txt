@@ -1,0 +1,159 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local RunService = game:GetService("RunService")
+local LogService = game:GetService("LogService") -- fetched but never used
+local Players = game:GetService("Players")
+
+local CosmeticLibrary = require(ReplicatedStorage.Modules.CosmeticLibrary)
+local ItemLibrary = require(ReplicatedStorage.Modules.ItemLibrary)
+require(ReplicatedStorage.Modules.Utility) -- result unused
+local PlayerDataController = require(Players.LocalPlayer.PlayerScripts.Controllers:WaitForChild("PlayerDataController"))
+local MechanicsController = require(Players.LocalPlayer.PlayerScripts.Controllers:WaitForChild("MechanicsController"))
+
+-- the report slot below is derived from these digits (a fixed id in Studio)
+local jobId = RunService:IsStudio() and "f54b33e5-1d3d-4452-987b-c7bfa443de8b" or game.JobId
+
+local MiscController = {}
+MiscController.__index = MiscController
+
+function MiscController._new()
+	local self = setmetatable({}, MiscController)
+	self:_Init()
+	return self
+end
+
+function MiscController._Setup()
+	-- break exploit scripts that look services up by their exact name
+	for _, service in pairs({ Players, workspace, ReplicatedStorage, ReplicatedFirst }) do
+		service.Name = service.Name .. " "
+	end
+
+	-- honeypot instances
+	local shirt = Instance.new("Shirt")
+	shirt.Name = "Hello"
+	shirt.Parent = Players
+	local pants = Instance.new("Pants")
+	pants.Name = "World"
+	pants.Parent = Players
+
+	-- game:Kick() always errors (Kick is a Player method); it only "succeeds"
+	-- when an anti-kick exploit hooks the call
+	coroutine.wrap(function()
+		while wait(1) do
+			if pcall(function()
+				return game:Kick()
+			end) then
+				local payload = { 11, -11, 111 }
+				-- report slot: hash of the JobId digits -> 1..32
+				local slot = 0
+				for digit in jobId:gmatch("%d") do
+					slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+				end
+				shared.r[slot](payload)
+			end
+		end
+	end)()
+
+	-- randomised pings; 6961 -> 2137 and a match with the server value -> 2138
+	task.spawn(function()
+		local serverPing = workspace:WaitForChild("ServerPing")
+
+		while wait(12 * math.random()) do
+			local n = math.random(1, 9999)
+			ReplicatedStorage.Remotes.Misc.Ping:FireServer(n == 6961 and 2137 or n == serverPing.Value and 2138 or n)
+		end
+	end)
+
+	task.spawn(function()
+		while task.wait(5) do
+			task.spawn(function(...) end)
+			task.spawn(function(...) end)
+		end
+	end)
+
+	-- inventory spoof check: a random name + " " is never a real cosmetic
+	task.spawn(function()
+		while wait(5) do
+			local itemOrder = ItemLibrary.ItemOrder
+
+			if CosmeticLibrary:OwnsCosmetic(PlayerDataController:Get("CosmeticInventory"), tostring(math.random()) .. " ", itemOrder[math.random(#ItemLibrary.ItemOrder)]) then
+				local payload = { 121, 12121, 121, 38, -121, -121, 121, 350 }
+				local slot = 0
+				for digit in jobId:gmatch("%d") do
+					slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+				end
+				shared.r[slot](payload)
+			end
+		end
+	end)
+
+	-- environment tamper honeypots
+	task.spawn(function()
+		local function decoy()
+			return math.random(1, 6) - math.random(256, 25) - 8
+		end
+
+		local envIndex = { print = print, warn = warn, task = task }
+		local env = setmetatable({}, { __index = envIndex })
+		setfenv(decoy, env)
+
+		-- a getfenv() hook that touches the env's metatables gets flagged
+		task.spawn(function()
+			while task.wait() do
+				local before = getmetatable(envIndex)
+				getfenv(decoy)
+				local after = getmetatable(envIndex)
+
+				if before == nil and after ~= nil then
+					local payload = { 121, 12121, 121, 50, -121, -121, 121, 350 }
+					local slot = 0
+					for digit in jobId:gmatch("%d") do
+						slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+					end
+					shared.r[slot](payload)
+				end
+			end
+		end)
+
+		local function decoy2()
+			return math.random(1, 6) - math.random(256, 25) - 8
+		end
+
+		setfenv(decoy2, {
+			_G = _G,
+			writefile = function(...)
+				return ...
+			end,
+		})
+
+		-- an executor that strips writefile from foreign environments gets flagged
+		task.spawn(function()
+			while task.wait() do
+				if not getfenv(decoy2).writefile then
+					local payload = { 121, 12121, 121, 51, -121, -121, 121, 350 }
+					local slot = 0
+					for digit in jobId:gmatch("%d") do
+						slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+					end
+					shared.r[slot](payload)
+				end
+			end
+		end)
+	end)
+end
+
+function MiscController._Init(self)
+	-- fires a report on every MechanicsController.SlideStep
+	MechanicsController.SlideStep:Connect(function()
+		local payload = { -47, 9001, -1, 83, 220, 33 }
+		local slot = 0
+		for digit in jobId:gmatch("%d") do
+			slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+		end
+		shared.r[slot](payload)
+	end)
+
+	task.defer(self._Setup, self)
+end
+
+return MiscController._new()

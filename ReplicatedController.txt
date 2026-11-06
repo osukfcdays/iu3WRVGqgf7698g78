@@ -1,0 +1,135 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players") -- fetched but never used
+
+local ReplicatedClass = require(ReplicatedStorage.Modules.ReplicatedClass)
+local EnumLibrary = require(ReplicatedStorage.Modules.EnumLibrary)
+local Signal = require(ReplicatedStorage.Modules.Signal)
+
+local ReplicatedController = {}
+ReplicatedController.__index = ReplicatedController
+
+function ReplicatedController.new(name)
+	assert(typeof(name) == "string", "Argument 1 invalid, expected a string, got " .. tostring(name))
+	local self = setmetatable({}, ReplicatedController)
+	self.Name = name
+	self.Objects = {}
+	self.CurrentObject = nil
+	self.ObjectAdded = Signal.new()
+	self.ObjectRemoved = Signal.new()
+	self._remote_folder = ReplicatedStorage.Remotes.Replication:WaitForChild(self.Name)
+	self._stored_constructors = {}
+	self._objects_requested = false
+	self._reject_object_added_serial_callback = nil
+	self:_Init()
+	return self
+end
+
+function ReplicatedController:GetObject(objectId)
+	assert(typeof(objectId) == "string", "Argument 1 invalid, expected a string")
+
+	for index, object in pairs(self.Objects) do
+		if object:Get("ObjectID") == objectId then
+			return object, index
+		end
+	end
+end
+
+function ReplicatedController:_ObjectChanged(objectId, key, ...)
+	assert(typeof(objectId) == "string", "Argument 1 invalid, expected a string")
+	assert(typeof(key) == "string", "Argument 2 invalid, expected a string")
+	local object = self:GetObject(objectId)
+	if not object then
+		return
+	end
+	object:ReplicateFromServer(EnumLibrary:FromEnum(key) or key, ...)
+end
+
+function ReplicatedController:_ObjectAdded(serial)
+	assert(typeof(serial) == "table", "Argument 1 invalid, expected a table")
+	if self:GetObject(serial[EnumLibrary:ToEnum("Data")][EnumLibrary:ToEnum("ObjectID")]) then
+		return
+	end
+
+	local classEnum = serial[EnumLibrary:ToEnum("ClientReplicatedClassType")]
+	local className = EnumLibrary:FromEnum(classEnum) or classEnum
+	local replicatedClass = ReplicatedClass:GetReplicatedClass(className)
+	if self._reject_object_added_serial_callback and self._reject_object_added_serial_callback(serial) then
+		return
+	end
+
+	if not self._stored_constructors[className] then
+		if typeof(replicatedClass) == "function" then
+			self._stored_constructors[className] = replicatedClass().new
+		else
+			self._stored_constructors[className] = replicatedClass.new
+		end
+	end
+
+	local object = self._stored_constructors[className](serial)
+	table.insert(self.Objects, object)
+	self.CurrentObject = object
+	self.ObjectAdded:Fire(object)
+end
+
+function ReplicatedController:_ObjectRemoved(objectId)
+	assert(typeof(objectId) == "string", "Argument 1 invalid, expected a string")
+	local object, index = self:GetObject(objectId)
+	if not index then
+		return
+	end
+	table.remove(self.Objects, index)
+	self.ObjectRemoved:Fire(object)
+	object:Destroy()
+
+	if object == self.CurrentObject then
+		self.CurrentObject = nil
+	end
+end
+
+function ReplicatedController:_ObjectsRequested(serials)
+	self._objects_requested = true
+	serials = serials or {}
+
+	for _, serial in pairs(serials) do
+		task.spawn(self._ObjectAdded, self, serial)
+	end
+end
+
+function ReplicatedController:_Replicate(messageEnum, ...)
+	local args = table.pack(...)
+	local message = EnumLibrary:FromEnum(messageEnum)
+
+	if message == "ReplicationRequest" then
+		self:_ObjectsRequested(...)
+	end
+	-- nothing is applied before the initial object list has arrived
+	if not self._objects_requested then
+		return
+	end
+
+	if message == "ReplicationAdded" then
+		self:_ObjectAdded(table.unpack(args, 1, args.n))
+	elseif message == "ReplicationChanged" then
+		self:_ObjectChanged(table.unpack(args, 1, args.n))
+	elseif message == "ReplicationRemoved" then
+		self:_ObjectRemoved(table.unpack(args, 1, args.n))
+	end
+end
+
+function ReplicatedController:_Setup()
+	self._remote_folder:WaitForChild("Replicate").OnClientEvent:Connect(function(...)
+		self:_Replicate(...)
+	end)
+
+	self._remote_folder:WaitForChild("ReplicateUnreliable").OnClientEvent:Connect(function(...)
+		self:_Replicate(...)
+	end)
+
+	self._remote_folder:WaitForChild("RequestReplication"):FireServer()
+end
+
+function ReplicatedController:_Init()
+	task.delay(0, self._Setup, self)
+end
+
+return ReplicatedController

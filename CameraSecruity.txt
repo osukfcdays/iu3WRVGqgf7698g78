@@ -1,0 +1,71 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+require(ReplicatedStorage.Modules.Utility) -- result unused
+
+-- the report slot is derived from these digits (a fixed id in Studio)
+local jobId = RunService:IsStudio() and "f54b33e5-1d3d-4452-987b-c7bfa443de8b" or game.JobId
+
+local function countKeys(t)
+	local n = 0
+	for _ in next, t do
+		n += 1
+	end
+	return n
+end
+
+local CameraSecurity = setmetatable({ SecurityDisabled = false }, {
+	-- pcall(getfenv, 1): level 1 is pcall itself (a C function), which gives the
+	-- *calling thread's* globals; only an executor thread has hookfunction there
+	__index = function(self, key)
+		local ok, env = pcall(getfenv, 1)
+		if ok and env.hookfunction then
+			local payload = { 14, -29, 923 }
+			local slot = 0
+			for digit in jobId:gmatch("%d") do
+				slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+			end
+			shared.r[slot](payload)
+		end
+		return rawget(self, key)
+	end,
+
+	__newindex = function(self, key, value)
+		local ok, env = pcall(getfenv, 1)
+		if ok and env.hookfunction then
+			local payload = { -2, 78, 16 }
+			local slot = 0
+			for digit in jobId:gmatch("%d") do
+				slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+			end
+			shared.r[slot](payload)
+		end
+		return rawset(self, key, value)
+	end,
+
+	-- anything that prints/dumps the object is reported unconditionally
+	__tostring = function()
+		local payload = { -64, 13, 192 }
+		local slot = 0
+		for digit in jobId:gmatch("%d") do
+			slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+		end
+		shared.r[slot](payload)
+		return "LocalPlayer = nil"
+	end,
+})
+
+-- watchdog: the metatable must keep exactly its 3 metamethods
+task.spawn(function()
+	while task.wait(1) do
+		if #setmetatable(getmetatable(CameraSecurity), { __len = countKeys }) ~= 3 then
+			local payload = { -10, 15, -150 }
+			local slot = 0
+			for digit in jobId:gmatch("%d") do
+				slot = (slot * 31 + digit:byte() - 48) % 32 + 1
+			end
+			shared.r[slot](payload)
+		end
+	end
+end)
+
+return CameraSecurity

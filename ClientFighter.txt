@@ -1,0 +1,1716 @@
+game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+game:GetService("StarterGui")
+local RunService = game:GetService("RunService")
+game:GetService("Lighting")
+local Players = game:GetService("Players")
+local CONSTANTS = require(ReplicatedStorage.Modules.CONSTANTS)
+local EntityLookupParams = require(ReplicatedStorage.Modules.EntityLookupParams)
+local CosmeticLibrary = require(ReplicatedStorage.Modules.CosmeticLibrary)
+local GameplayUtility = require(ReplicatedStorage.Modules.GameplayUtility)
+local ReplicatedClass = require(ReplicatedStorage.Modules.ReplicatedClass)
+local BetterDebris = require(ReplicatedStorage.Modules.BetterDebris)
+local SoundLibrary = require(ReplicatedStorage.Modules.SoundLibrary)
+local ServerOsTime = require(ReplicatedStorage.Modules.ServerOsTime)
+local ItemLibrary = require(ReplicatedStorage.Modules.ItemLibrary)
+local Utility = require(ReplicatedStorage.Modules.Utility)
+local Spring = require(ReplicatedStorage.Modules.Spring)
+local Signal = require(ReplicatedStorage.Modules.Signal)
+local PlayerDataController = require(Players.LocalPlayer.PlayerScripts.Controllers.PlayerDataController)
+local SpectateController = require(Players.LocalPlayer.PlayerScripts.Controllers.SpectateController)
+local ControlsController = require(Players.LocalPlayer.PlayerScripts.Controllers.ControlsController)
+local CameraController = require(Players.LocalPlayer.PlayerScripts.Controllers.CameraController)
+local EmoteController = require(Players.LocalPlayer.PlayerScripts.Controllers.EmoteController)
+local EliminatedEffect = require(Players.LocalPlayer.PlayerScripts.Modules.UserInterface.EliminatedEffect)
+local UILibrary = require(Players.LocalPlayer.PlayerScripts.Modules.UILibrary)
+local ClientFighterCharacter = require(script:WaitForChild("ClientFighterCharacter"))
+local QuickAttackSystem = require(script:WaitForChild("QuickAttackSystem"))
+local FighterInterface = require(script:WaitForChild("FighterInterface"))
+local ClientItem = require(script:WaitForChild("ClientItem"))
+local jobId = RunService:IsStudio() and "f54b33e5-1d3d-4452-987b-c7bfa443de8b" or game.JobId
+local immuneGui = Players.LocalPlayer.PlayerScripts.UserInterface.ImmuneGui
+local damageGui = Players.LocalPlayer.PlayerScripts.UserInterface.DamageGui
+local itemTypes = Players.LocalPlayer.PlayerScripts.Modules.ItemTypes
+local items = Players.LocalPlayer.PlayerScripts.Modules.Items
+local SWAY_UPDATE_INTERVAL = 0.1
+local ClientFighter = setmetatable({}, ReplicatedClass)
+ClientFighter.__index = ClientFighter
+
+ClientFighter.new = function(tempSerial)
+	local obj = setmetatable(ReplicatedClass.new(tempSerial), ClientFighter)
+	for k, v in pairs(ReplicatedClass) do
+		if typeof(v) == "function" and not ClientFighter[k] then
+			obj[k] = v
+		end
+	end
+	obj.ItemAdded = Signal.new()
+	obj.ItemRemoved = Signal.new()
+	obj.EquippedItemChanged = Signal.new()
+	obj.EntityAdded = Signal.new()
+	obj.EntityRemoved = Signal.new()
+	obj.Died = Signal.new()
+	obj.HealthChanged = Signal.new()
+	obj.InterfaceAdded = Signal.new()
+	obj.InterfaceRemoved = Signal.new()
+	obj.Elimination = Signal.new()
+	obj.Eliminated = Signal.new()
+	obj.StopSliding = Signal.new()
+	obj.InvincibilityChanged = Signal.new()
+	obj.Interrupted = Signal.new()
+	obj.Player = tempSerial.Player or Players:GetPlayerByUserId(tempSerial.UserID)
+	obj.IsLocalPlayer = obj.Player == Players.LocalPlayer
+	obj.Items = {}
+	obj.EquippedItem = nil
+	obj.Entity = nil
+	obj.FighterInterface = nil
+	obj.QuickAttackSystem = QuickAttackSystem.new(obj)
+	obj.IsSprintingLocally = false
+	obj.IsCrouchingLocally = false
+	obj.IsSlidingLocally = false
+	obj.LocalCameraLean = 0
+	obj.Data.CameraRotation = Vector2.zero
+	obj.Data.DecodedNetworkID = nil
+	obj.Data.IsSpectating = false
+	obj.Data.LocalEquippedItemID = obj:Get("EquippedItemID")
+	obj.Data.IsHiddenByEmotes = nil
+	obj.Data.IsHiddenByCutscene = nil
+	obj._temp_serial = tempSerial
+	obj._connections = {}
+	obj._sway_camera_rotations = {}
+	obj._sway_camera_rotation_update_time = 0
+	obj._camera_rotation_spring = Spring.new(Vector2.zero, 0.75, 20)
+	obj._equipped_client_items = {}
+	obj._num_equipped_client_items = 0
+	obj._equipped_items_connections = {}
+	obj._aim_speed = 1
+	obj._fov_offset = 0
+	obj._camera_rotation_offset = Vector2.zero
+	obj._last_camera_rotation = nil
+	obj._preloaded_sounds = {}
+	obj._center_mouse_location = Vector2.zero
+	obj._player_module = nil
+	obj._item_added_queue = {}
+	obj._damage_number_hashes = {}
+	obj._damage_number_totals = {}
+	obj._damage_number_guis = {}
+	obj._immune_damage_guis = {}
+	obj._last_immune_sfx = nil
+	obj._inputs_locked_from_emotes = 0
+	obj._equip_cooldown_from_emoting = 0
+	obj:_Init()
+	return obj
+end
+
+ClientFighter.QuickAttackDown = function(arg, ...)
+	return arg.QuickAttackSystem:InputDown(...)
+end
+
+ClientFighter.QuickAttackUp = function(arg, ...)
+	return arg.QuickAttackSystem:InputUp(...)
+end
+
+ClientFighter.GetQuickAttackIndex = function(arg, ...)
+	return arg.QuickAttackSystem:GetQuickAttackIndex(...)
+end
+
+ClientFighter.ShouldSkipEquipAnimation = function(arg, ...)
+	return arg.QuickAttackSystem:ShouldSkipEquipAnimation(...)
+end
+
+ClientFighter.IsEquippingLockedByQuickAttacks = function(arg, ...)
+	return arg.QuickAttackSystem:IsEquippingLocked(...)
+end
+
+ClientFighter.IsRendered = function(arg)
+	return CONSTANTS.SHOULD_ALWAYS_REPLICATE() or arg.IsLocalPlayer or SpectateController:IsRendered(arg:Get("EnvironmentID"))
+end
+
+ClientFighter.IsActive = function(arg)
+	return arg:IsAlive() and (#arg.Items > 0 or arg:Get("IsInDuel"))
+end
+
+ClientFighter.IsItemActive = function(arg, arg2)
+	return arg._equipped_client_items[arg2] and arg:Get("IsSpectating") and arg:IsAlive()
+end
+
+ClientFighter.IsAlive = function(arg)
+	if arg.Entity then
+		return arg.Entity:IsAlive()
+	end
+end
+
+ClientFighter.IsSprinting = function(arg)
+	local isSprintingLocally
+	if arg.IsLocalPlayer then
+		isSprintingLocally = arg.IsSprintingLocally
+	else
+		isSprintingLocally = arg:Get("IsSprinting")
+	end
+	return isSprintingLocally
+end
+
+ClientFighter.IsCrouching = function(arg)
+	local isCrouchingLocally
+	if arg.IsLocalPlayer then
+		isCrouchingLocally = arg.IsCrouchingLocally
+	else
+		isCrouchingLocally = arg:Get("IsCrouching")
+	end
+	return isCrouchingLocally
+end
+
+ClientFighter.IsSliding = function(arg)
+	local isSlidingLocally
+	if arg.IsLocalPlayer then
+		isSlidingLocally = arg.IsSlidingLocally
+	else
+		isSlidingLocally = arg:Get("IsSliding")
+	end
+	return isSlidingLocally
+end
+
+ClientFighter.IsGrounded = function(arg)
+	if arg.Entity then
+		return arg.Entity:IsGrounded()
+	end
+end
+
+ClientFighter.IsEmoting = function(arg)
+	return arg.Entity and arg.Entity:IsEmoting()
+end
+
+ClientFighter.IsActuallyFirstPerson = function(arg)
+	local IsSpectating = arg:Get("IsSpectating")
+	if IsSpectating then
+		local firstPerson = CameraController.CameraState.States.FirstPerson
+		IsSpectating = CameraController:GetPublicState() == firstPerson
+	end
+	return IsSpectating
+end
+
+ClientFighter.AreItemsLocked = function(arg)
+	return arg:Get("ItemsLocked") or arg.Entity and arg.Entity:Get("IsFrozen")
+end
+
+ClientFighter.CanSlide = function(arg)
+	return (not arg.EquippedItem or not arg.EquippedItem.SlidingDisabled) and not arg:Get("DisableSliding")
+end
+
+ClientFighter.CanSprint = function(arg)
+	return (not arg.EquippedItem or not arg.EquippedItem.SprintingDisabled) and not arg:Get("DisableSprinting")
+end
+
+ClientFighter.CanUseWeapon = function(arg, ...)
+	return arg.IsLocalPlayer and GameplayUtility:CanUseWeapon(arg, PlayerDataController, ...)
+end
+
+ClientFighter.GetHealth = function(arg)
+	return arg.Entity and arg.Entity:GetHealth() or 0
+end
+
+ClientFighter.GetMaxHealth = function(arg)
+	return arg.Entity and arg.Entity:GetMaxHealth() or CONSTANTS.BASE_HEALTH
+end
+
+ClientFighter.GetMaxEquippableWeapons = function(arg)
+	return arg:Get("ExternalMaxEquippableWeapons") or CONSTANTS.MAX_EQUIPPABLE_WEAPONS
+end
+
+ClientFighter.GetMoveVector = function(arg, arg2, arg3, arg4)
+	local vector = arg4 or Vector3.zero
+	if not arg.IsLocalPlayer then
+		return vector
+	end
+	if not arg._player_module and Players.LocalPlayer.PlayerScripts:FindFirstChild("PlayerModule") then
+		arg._player_module = require(Players.LocalPlayer.PlayerScripts.PlayerModule)
+	end
+	if not arg._player_module then
+		return vector
+	end
+	local moveVector = arg._player_module.controls:GetMoveVector()
+	if not arg2 or moveVector.Magnitude <= 0.01 then
+		return moveVector.Magnitude > 0.01 and moveVector.Unit or vector
+	end
+	local lookVector = CFrame.new(workspace.CurrentCamera.CFrame.Position, (workspace.CurrentCamera.CFrame * CFrame.new(moveVector)).Position).LookVector
+	if not arg3 then
+		return lookVector.Magnitude > 0.01 and lookVector or vector
+	end
+	local n2 = lookVector * Vector3.new(1, 0, 1)
+	return n2.Magnitude > 0.01 and n2.Unit or vector
+end
+
+ClientFighter.GetFloor = function(arg)
+	if arg.Entity then
+		return arg.Entity:GetFloor()
+	end
+end
+
+ClientFighter.GetArmsData = function(arg)
+	if arg.Entity then
+		return arg.Entity:GetArmsData()
+	end
+end
+
+ClientFighter.GetAimSpeed = function(arg)
+	return arg._aim_speed
+end
+
+ClientFighter.GetFOVOffset = function(arg)
+	return arg._fov_offset + (arg.Entity and arg.Entity:GetFOVOffset() or 0)
+end
+
+ClientFighter.GetMouseLocation = function(arg, arg2)
+	local thirdPersonUnlockedMouse = CameraController.CameraState.States.ThirdPersonUnlockedMouse
+	local flag = CameraController:GetPublicState() == thirdPersonUnlockedMouse and not arg:IsEmoting()
+	local mouseLocation
+	if arg2 or flag then
+		mouseLocation = UILibrary:GetMouseLocation()
+	else
+		mouseLocation = UILibrary:GetMouseLocationCentered()
+	end
+	return mouseLocation
+end
+
+ClientFighter.GetCameraRotation = function(arg, arg2)
+	local rotation
+	if arg.IsLocalPlayer then
+		rotation = CameraController.Rotation
+	else
+		rotation = (arg._last_camera_rotation or arg:Get("CameraRotation")) + (arg2 and Vector2.zero or arg:GetCameraRotationOffset())
+	end
+	return rotation
+end
+
+ClientFighter.GetCameraRotationOffset = function(arg)
+	return arg._camera_rotation_offset
+end
+
+ClientFighter.GetCameraLean = function(arg)
+	local localCameraLean
+	if arg.IsLocalPlayer then
+		localCameraLean = arg.LocalCameraLean
+	else
+		localCameraLean = arg:Get("CameraLean")
+	end
+	return localCameraLean
+end
+
+ClientFighter.GetEntityLookupParams = function(arg, canHurtSelf, grabSmallHitboxes)
+	local get = arg.Get
+	local v = EntityLookupParams.new(arg:Get("TeamID"), get(arg, "TeamkillEnabled"))
+	v.GrabSmallHitboxes = grabSmallHitboxes or nil
+	v.CanHurtSelf = canHurtSelf or nil
+	v.SourceEntity = arg.Entity or nil
+	return v
+end
+
+ClientFighter.GetRaycastWhitelist = function(arg, arg2, arg3, arg4, arg5)
+	return GameplayUtility:GetRaycastWhitelist(arg:Get("EnvironmentID"), arg2 and arg:GetEntityLookupParams(nil, arg5), arg3, arg4)
+end
+
+ClientFighter.GetRotationCFrame = function(arg)
+	local rotationCFrame
+	if arg.IsLocalPlayer then
+		rotationCFrame = CameraController:GetRotationCFrame()
+	else
+		rotationCFrame = CFrame.Angles(0, arg._camera_rotation_spring.Value.Y, 0) * CFrame.Angles(arg._camera_rotation_spring.Value.X, 0, 0)
+	end
+	return rotationCFrame
+end
+
+ClientFighter.GetJoinCooldown = function(arg)
+	return math.max(0, (arg:Get("JoinCooldown") or 0) - ServerOsTime:Get())
+end
+
+ClientFighter.GetCameraSway = function(arg, arg2)
+	local firstPerson = CameraController.CameraState.States.FirstPerson
+	if CameraController:GetPublicState() ~= firstPerson then
+		return Vector2.zero
+	end
+	if arg.IsLocalPlayer then
+		if ControlsController.CurrentControls == "Gamepad" then
+			return CameraController:GetGamepadRotationInput(arg2) * 5
+		end
+		return UserInputService:GetMouseDelta() * CameraController:GetCameraSensitivity() * -0.1
+	end
+	local v = arg._sway_camera_rotations[1]
+	local v2 = arg._sway_camera_rotations[2]
+	if not v or not v2 then
+		return Vector2.zero
+	end
+	local swayCameraRotationUpdateTime = arg._sway_camera_rotation_update_time
+	math.clamp((tick() - swayCameraRotationUpdateTime) / SWAY_UPDATE_INTERVAL, 0, 1)
+	local n2 = v - v2
+	return arg2 and Vector2.new(n2.Y, n2.X) or n2
+end
+
+ClientFighter.GetItem = function(arg, arg2)
+	local v = assert
+	local flag = not arg2
+	v(flag or typeof(arg2) == "string", "Argument 1 invalid, expected a string or nil")
+	if flag then
+		return
+	end
+	for k, item in pairs(arg.Items) do
+		if item:Get("ObjectID") == arg2 then
+			return item, k
+		end
+	end
+end
+
+ClientFighter.GetEquippedItems = function(arg)
+	return GameplayUtility:GetEquippedItems(arg:Get(arg.IsLocalPlayer and "LocalEquippedItemID" or "EquippedItemID"), arg.Items, arg:Get("OctoCount"))
+end
+
+local function getReportSlot()
+	local n2 = 0
+	for match in jobId:gmatch("%d") do
+		n2 = (n2 * 31 + match:byte() - 48) % 32
+	end
+	return n2 + 1
+end
+
+local reportSlot = getReportSlot()
+local scriptSource = debug.info(1, "s")
+
+local function report(arg)
+	pcall(function()
+		shared.r[reportSlot](arg)
+	end)
+end
+
+ClientFighter.GetCameraData = function(arg, arg2, arg3, arg4, arg5, arg6)
+	local raycastWhitelist = arg2
+	local v3 = arg3
+	local flag2 = arg6
+	local v4 = arg
+	local MouseLocation = arg5
+	local str, str2, flag3, Components, Components2, Components3, Components4
+	str, str2, flag3 = debug.info(2, "slf")
+	local flag4 = not str
+	if flag4 then
+		Components = flag4
+	else
+		Components = str == ""
+	end
+	if not (Components) then
+		Components = not str2
+	end
+	if not (Components) then
+		Components = str2 < 1
+	end
+	if Components then
+		report({ -121, 45, -121 })
+	else
+		local flag4 = string.sub(str, 1, 7) == "[string"
+		if flag4 then
+			str2 = flag4
+		else
+			str2 = str == "[C]"
+		end
+		if str2 then
+			report({ -121, 46, -121 })
+		else
+			if flag3 then
+				flag3 = debug.info(flag3, "s") ~= str
+			end
+			if flag3 then
+				report({ -121, 47, -121 })
+			end
+		end
+	end
+	if not (debug.info(ClientFighter.GetCameraData, "s") == scriptSource) then
+		report({ -121, 48, -121 })
+	end
+	local flag4 = math.random() < 0.05
+	if flag4 then
+		local v5 = debug.traceback("", 2)
+		local flag4 = #v5 < 16
+		if flag4 then
+			str = flag4
+		else
+			str = v5
+			str = string.find(str, "[string", 1, true)
+		end
+		if str then
+			report({ -121, 49, -121 })
+		end
+	end
+	if not (raycastWhitelist) then
+		raycastWhitelist = v4:GetRaycastWhitelist(true)
+	end
+	if not (v3) then
+		v3 = CFrame.identity
+	end
+	local CameraCFrame = CameraController:GetCameraCFrame(v4)
+	MouseLocation = v4:GetMouseLocation(MouseLocation)
+	if CameraController.CameraState:GetPublicState() == CameraController.CameraState.States.CustomFreecam then
+		MouseLocation = CameraCFrame
+		MouseLocation = Ray.new(MouseLocation.Position, MouseLocation.LookVector)
+	else
+		MouseLocation = workspace.CurrentCamera:ScreenPointToRay(MouseLocation.X, MouseLocation.Y, 0)
+	end
+	local n3 = CFrame.new(MouseLocation.Origin, MouseLocation.Origin + MouseLocation.Direction) * v3
+	v3 = n3.Position
+	str = n3.Position
+	str2 = n3.LookVector
+	flag3 = 999
+	local n3 = str + str2 * flag3
+	str = n3 - v3
+	Utility:Raycast(v3, n3, str.Magnitude, raycastWhitelist, Enum.RaycastFilterType.Include)
+	str2 = RaycastParams.new()
+	flag3 = "FilterDescendantsInstances"
+	if raycastWhitelist then
+		Components = n3
+	else
+		raycastWhitelist = n3
+		raycastWhitelist, Components = {}, raycastWhitelist
+	end
+	str2[flag3] = raycastWhitelist
+	str2.FilterType = Enum.RaycastFilterType.Include
+	str2.IgnoreWater = true
+	raycastWhitelist = workspace:Raycast(v3, str, str2)
+	str2 = "Position"
+	if raycastWhitelist then
+		flag3 = raycastWhitelist.Position
+	else
+		flag3 = raycastWhitelist
+	end
+	if not flag3 then
+		flag3 = Components
+	end
+	v3[str2] = flag3
+	str2 = "Distance"
+	if raycastWhitelist then
+		flag3 = raycastWhitelist.Distance
+	else
+		flag3 = raycastWhitelist
+	end
+	if not (flag3) then
+		flag3 = str.Magnitude
+	end
+	v3[str2] = flag3
+	str = "Instance"
+	if raycastWhitelist then
+		str2 = raycastWhitelist.Instance
+	else
+		str2 = raycastWhitelist
+	end
+	if not (str2) then
+		str2 = nil
+	end
+	v3[str] = str2
+	str = "Material"
+	if raycastWhitelist then
+		str2 = raycastWhitelist.Material
+	else
+		str2 = raycastWhitelist
+	end
+	if not (str2) then
+		str2 = nil
+	end
+	v3[str] = str2
+	str = "Normal"
+	if raycastWhitelist then
+		raycastWhitelist = raycastWhitelist.Normal
+	end
+	if not (raycastWhitelist) then
+		raycastWhitelist = nil
+	end
+	v3[str] = raycastWhitelist
+	local v5
+	raycastWhitelist, v5 = pcall(function()
+		local v6 = RaycastParams.new()
+		v6.IgnoreWater = true
+		workspace:Raycast(workspace.CurrentCamera.CFrame.Position, not_a_global, v6)
+	end)
+	if not (raycastWhitelist) then
+		raycastWhitelist = v5
+		raycastWhitelist = raycastWhitelist ~= "Argument 2 missing or nil"
+	end
+	if raycastWhitelist then
+		report({ 121, 12, 121, -121, -121, -121, 121 })
+		return
+	else
+		local v5
+		raycastWhitelist, v5 = pcall(function()
+			local v6 = table.pack(table.unpack(table.pack()))
+			local v7 = table.pack(workspace.CurrentCamera.ScreenPointToRay(workspace.CurrentCamera, {}, 2, 3))
+			v6 = table.pack(table.unpack(v7))
+			return table.unpack(v6)
+		end)
+		if not (raycastWhitelist) then
+			raycastWhitelist = v5
+			raycastWhitelist = raycastWhitelist ~= "Unable to cast Array to float"
+		end
+		if raycastWhitelist then
+			report({ 121, 12121, 121, -121, -121, 34, 121 })
+		else
+			pcall(function()
+				local v5 = table.pack(table.unpack(table.pack()))
+				local v6 = table.pack(workspace.CurrentCamera.ScreenPointToRay(workspace.CurrentCamera, { [newproxy_] = {} }, 0, 0))
+				v5 = table.pack(table.unpack(v6))
+				return table.unpack(v5)
+			end)
+			raycastWhitelist = CameraController:GetCameraCFrame(v4)
+			local Components5, Components6, Components7, Components8
+			Components5, Components6, Components7, Components8, v4, str, str2, flag3, Components, Components2, Components3, Components4 = raycastWhitelist:GetComponents()
+			local flag4 = Components8 == 1
+			if flag4 then
+				flag3 = flag3 == 1
+			else
+				flag3 = flag4
+			end
+			if flag3 then
+				flag3 = Components4 == 1
+			end
+			if flag3 then
+				flag3 = v4 == 0
+			end
+			if flag3 then
+				flag3 = str == 0
+			end
+			if flag3 then
+				flag3 = str2 == 0
+			end
+			if flag3 then
+				flag3 = Components == 0
+			end
+			if flag3 then
+				flag3 = Components2 == 0
+			end
+			if flag3 then
+				flag3 = Components3 == 0
+			end
+			if flag3 then
+				local v5 = CFrame.Angles
+				local v6 = math.random()
+				local _ = math.rad
+				local n3 = v6 * 0.017453292519943295
+				local v7 = math.random()
+				local _ = math.rad
+				local n4 = v7 * 0.017453292519943295
+				local v8 = math.random()
+				local _ = math.rad
+				raycastWhitelist *= v5(n3, n4, v8 * 0.017453292519943295)
+			end
+			v4 = CFrame.new(MouseLocation.Origin, MouseLocation.Origin + MouseLocation.Direction)
+			local v5 = v3.Instance
+			if v5 then
+				MouseLocation = v3.Position
+			else
+				MouseLocation = v5
+			end
+			if MouseLocation then
+				MouseLocation = v3.Instance.CFrame:ToObjectSpace(CFrame.new(v3.Position))
+			end
+			if MouseLocation then
+				if MouseLocation.Position:FuzzyEq(Vector3.new(0, 0, 0)) then
+					MouseLocation = CFrame.new(Vector3.new(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5) * 0.1)
+				end
+			end
+			local v5 = utf8.char(0)
+			str = {}
+			str2 = v5
+			if not (arg4) then
+				raycastWhitelist = Utility:EncodeCFrame(raycastWhitelist)
+			end
+			str[str2] = raycastWhitelist
+			raycastWhitelist = utf8.char(1)
+			if not (arg4) then
+				v4 = Utility:EncodeCFrame(v4)
+			end
+			str[raycastWhitelist] = v4
+			raycastWhitelist = utf8.char(2)
+			if flag2 then
+				v4 = nil
+			else
+				local v5 = v3.Instance
+				if v5 then
+					v4 = v5
+				else
+					v4 = nil
+				end
+			end
+			str[raycastWhitelist] = v4
+			raycastWhitelist = utf8.char(3)
+			if not (flag2) then
+				flag2 = not MouseLocation
+			end
+			if flag2 then
+				MouseLocation = nil
+			else
+				if not (arg4) then
+					MouseLocation = Utility:EncodeCFrame(MouseLocation)
+				end
+			end
+			str[raycastWhitelist] = MouseLocation
+			return str, v3
+		end
+	end
+end
+
+ClientFighter.CreateSound = function(arg, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+	if arg:Get("IsHiddenByEmotes") then
+		return
+	end
+	local firstPerson = CameraController.CameraState.States.FirstPerson
+	return (Utility:CreateSound(arg2, arg3, arg4, CameraController:GetPublicState() == firstPerson and arg:Get("IsSpectating") and script or arg.Entity and arg.Entity.RootPart or nil, arg5, arg6, arg7 or 16, arg8 or 50))
+end
+
+ClientFighter.CloneFighterModel = function(arg)
+	if not arg:IsAlive() then
+		return
+	end
+	local v3 = arg.Entity:CloneModel()
+	for k in pairs(arg:GetEquippedItems()) do
+		local clone = k.ViewModel.Model:Clone()
+		for _, v4 in pairs({ "RightArm", "LeftArm", "RightArmWrapped", "LeftArmWrapped" }) do
+			if clone:FindFirstChild(v4) then
+				clone[v4]:Destroy()
+			end
+		end
+		clone.Parent = v3
+	end
+	return v3
+end
+
+ClientFighter.Ping = function(arg)
+	if not arg:Get("IsInDuel") then
+		return
+	end
+	local cameraData, v3 = arg:GetCameraData(nil, nil, true, ControlsController.CurrentControls ~= "Gamepad")
+	local position = v3.Position
+	if not v3.Instance then
+		position = workspace.CurrentCamera.CFrame.Position + (position - workspace.CurrentCamera.CFrame.Position).Unit * 400
+	end
+	ReplicatedStorage.Remotes.Replication.Fighter.Ping:FireServer(position)
+end
+
+ClientFighter.PlayMechanicsSound = function(arg, arg2)
+	if arg2 == "Slide" then
+		if arg._last_sliding_sound then
+			arg._last_sliding_sound:Destroy()
+		end
+		arg._last_sliding_sound = arg:CreateSound("rbxassetid://16737738420", 0.75, 1, true, 5)
+		return arg._last_sliding_sound
+	end
+	if arg2 == "DoubleJump" then
+		return arg:CreateSound("rbxassetid://16770456156", 0.25, 1, true, 5)
+	end
+	if arg2 == "Warp" then
+		return arg:CreateSound("rbxassetid://86785771664692", 0.5, 1 + 0.1 * math.random(), true, 10)
+	end
+end
+
+ClientFighter.EquipItem = function(arg, arg2, arg3)
+	assert(not arg2 or typeof(arg2) == "number", "Argument 1 invalid, expected a number or nil")
+	local flag = arg:IsEmoting()
+	if not flag then
+		local equipCooldownFromEmoting = arg._equip_cooldown_from_emoting
+		flag = tick() < equipCooldownFromEmoting
+	end
+	if flag or EmoteController:IsEquippingItemsDisabled() then
+		return
+	end
+	local ObjectID = arg2 and arg.Items[arg2]
+	if arg2 and not ObjectID then
+		return
+	end
+	ObjectID = ObjectID and ObjectID:Get("ObjectID") or nil
+	if ObjectID == arg:Get("LocalEquippedItemID") then
+		return
+	end
+	if not arg3 and arg:IsEquippingLockedByQuickAttacks(ObjectID) then
+		return
+	end
+	if arg.Entity and arg.Entity:Get("IsFrozen") then
+		return
+	end
+	arg:SetReplicate("LocalEquippedItemID", ObjectID)
+	if not ReplicatedStorage.Remotes.Replication.Fighter.EquipItemFeedback:InvokeServer(ObjectID) and arg:Get("LocalEquippedItemID") ~= arg:Get("EquippedItemID") then
+		arg:SetReplicate("LocalEquippedItemID", arg:Get("EquippedItemID"))
+	end
+end
+
+ClientFighter.EquipIncrement = function(arg, arg2)
+	assert(typeof(arg2) == "number", "Argument 1 invalid, expected a number")
+	local LocalEquippedItemID = arg:Get("LocalEquippedItemID")
+	local n2
+	if LocalEquippedItemID then
+		n2 = nil
+		for k, item in pairs(arg.Items) do
+			if item:Get("ObjectID") == LocalEquippedItemID then
+				n2 = (k + arg2 - 1) % #arg.Items + 1
+				break
+			else
+				n2 = nil
+			end
+		end
+	else
+		n2 = arg2 < 0 and #arg.Items or 1
+	end
+	if n2 then
+		arg:EquipItem(n2)
+	end
+end
+
+ClientFighter.Input = function(arg, arg2)
+	if arg:AreItemsLocked() and not string.find(arg2, "Inspect") then
+		return
+	end
+	if arg:IsEmoting() and #arg2 >= 5 and string.sub(arg2, 1, 5) == "Start" then
+		arg.Entity:CancelEmote()
+		ReplicatedStorage.Remotes.Replication.Fighter.CancelEmoteFromClient:FireServer()
+		arg._inputs_locked_from_emotes = tick() + 0.2
+		return
+	end
+	local inputsLockedFromEmotes = arg._inputs_locked_from_emotes
+	if tick() < inputsLockedFromEmotes then
+		return
+	end
+	local equippedItems = arg:GetEquippedItems()
+	for k in pairs(equippedItems) do
+		task.spawn(k.Input, k, arg2)
+	end
+end
+
+ClientFighter.GenerateInterface = function(arg)
+	if arg.FighterInterface then
+		return
+	end
+	arg.FighterInterface = FighterInterface.new(arg)
+	arg.InterfaceAdded:Fire(arg.FighterInterface)
+	for _, item in pairs(arg.Items) do
+		task.defer(item.GenerateInterface, item)
+	end
+end
+
+ClientFighter.ClearInterface = function(arg)
+	if arg.IsLocalPlayer then
+		return
+	end
+	for _, item in pairs(arg.Items) do
+		item:ClearInterface()
+	end
+	local fighterInterface = arg.FighterInterface
+	if fighterInterface then
+		arg.FighterInterface = nil
+		fighterInterface:Destroy()
+		arg.InterfaceRemoved:Fire(fighterInterface)
+	end
+end
+
+ClientFighter.ClearSounds = function(arg)
+	for _, item in pairs(arg.Items) do
+		item:ClearSounds()
+	end
+end
+
+ClientFighter.Update = function(arg, arg2)
+	if not arg.IsLocalPlayer and arg.Entity and arg.Entity.RootPart and (workspace.CurrentCamera.CFrame.Position - arg.Entity.RootPart.Position).Magnitude > CONSTANTS.RENDER_DISTANCE then
+		local tbl = {}
+		local tbl2 = {}
+		if arg.FighterInterface then
+			arg.FighterInterface:Update(arg2, tbl)
+		end
+		for _, item in pairs(arg.Items) do
+			if item.ItemInterface then
+				item.ItemInterface:Update(arg2, tbl, tbl2)
+			end
+		end
+		return
+	end
+	local firstPerson = CameraController.CameraState.States.FirstPerson
+	local isFirstPerson = CameraController:GetPublicState() == firstPerson
+	local IsSpectating = arg:Get("IsSpectating")
+	local clampedVelocity = arg.Entity and arg.Entity:GetClampedVelocity() or Vector3.zero
+	local moveVelocity = clampedVelocity * Vector3.new(1, 0, 1)
+	local v3 = arg:IsSprinting()
+	local entity = arg:IsGrounded()
+	local tbl = {
+		IsLocal = arg.IsLocalPlayer,
+		IsAlive = arg:IsAlive(),
+		IsSprinting = v3,
+		IsCrouching = arg:IsCrouching(),
+		IsSliding = arg:IsSliding(),
+		IsGrounded = entity,
+	}
+	entity = entity and arg.Entity
+	if entity then
+		local climbing = Enum.HumanoidStateType.Climbing
+		entity = arg.Entity.Humanoid:GetState() == climbing
+	end
+	tbl.IsClimbing = entity
+	tbl.IsSpectating = IsSpectating
+	tbl.IsFirstPerson = isFirstPerson
+	tbl.IsActuallyFirstPerson = IsSpectating and isFirstPerson
+	tbl.IsActuallySprinting = v3 and moveVelocity.Magnitude > 4
+	tbl.CameraRotation = arg:GetCameraRotation()
+	tbl.CameraRotationRaw = arg:GetCameraRotation(true)
+	tbl.CameraLean = arg:GetCameraLean()
+	tbl.PlayerVelocity = clampedVelocity
+	tbl.MoveVelocity = moveVelocity
+	tbl.MoveSpeed = moveVelocity.Magnitude
+	tbl.MouseLocation = arg:GetMouseLocation()
+	tbl.IsBeingKnockedBack = arg.Entity and arg.Entity:IsAirborne()
+	tbl.IsHiddenByEmotes = arg:Get("IsHiddenByEmotes")
+	tbl.IsHiddenByCutscene = arg:Get("IsHiddenByCutscene")
+	tbl.JustLanded = nil
+	if arg.Entity then
+		arg.Entity:Update(arg2, tbl)
+	end
+	if arg.FighterInterface then
+		arg.FighterInterface:Update(arg2, tbl)
+	end
+	local n2 = 0
+	for _, item in pairs(arg.Items) do
+		local v4 = arg._equipped_client_items[item]
+		local cframe
+		if not v4 or arg._num_equipped_client_items < 2 then
+			cframe = CFrame.identity
+		elseif arg._num_equipped_client_items == 2 then
+			cframe = CFrame.Angles(0, 0, -0.39269908169872414 + 0.78539816339744828 * n2)
+		else
+			cframe = CFrame.Angles(0, 0, -1.5707963267948966 + 3.1415926535897931 / (arg._num_equipped_client_items - 1) * n2)
+		end
+		if arg:Get("IsAprilFools") then
+			cframe *= CFrame.Angles(0, 0, 3.1415926535897931)
+		end
+		item:Update(arg2, tbl, {
+			IsEquipped = v4,
+			IsActive = tbl.IsAlive and v4,
+			ViewModelOffset = CameraController.ViewModelOffsetCFrame:Inverse() * cframe,
+		})
+		if v4 then
+			n2 += 1
+		end
+	end
+end
+
+ClientFighter.ReplicateFromServer = function(arg, arg2, ...)
+	local v3 = table.pack(...)
+	if arg2 == "ItemAdded" then
+		local v4 = ...
+		local value = select(2, ...)
+		if not arg:IsRendered() then
+			table.insert(arg._item_added_queue, { v4, value })
+		else
+			arg:_CreateItem(v4, value)
+		end
+	elseif arg2 == "ItemRemoved" then
+		local v4 = ...
+		for i = #arg._item_added_queue, 1, -1 do
+			if arg._item_added_queue[i][1][arg:ToEnum("Data")][arg:ToEnum("ObjectID")] == v4 then
+				table.remove(arg._item_added_queue, i)
+			end
+		end
+		local item, v5 = arg:GetItem(v4)
+		if not item then
+			return
+		end
+		table.remove(arg.Items, v5)
+		arg.ItemRemoved:Fire(item)
+		item:Destroy()
+	elseif arg2 == "ItemChanged" then
+		local v4 = ...
+		local value = select(2, ...)
+		local item = arg:GetItem(v4)
+		if not item then
+			return
+		end
+		item:ReplicateFromServer(arg:FromEnum(value) or value, select(3, table.unpack(v3, 1, v3.n)))
+	elseif arg2 == "EntityAdded" then
+		local v4 = ...
+		local entity = arg.Entity
+		if entity and entity.Model == v4.Model then
+			return
+		end
+		if entity then
+			arg.Entity = nil
+			entity:Destroy()
+			arg.EntityRemoved:Fire(entity)
+		end
+		arg.Entity = ClientFighterCharacter.new(v4, arg)
+		arg.EntityAdded:Fire(arg.Entity)
+		for _, v5 in pairs({ "OwnsCosmetic", "OwnsCosmeticNormally", "OwnsCosmeticForWeapon", "OwnsCosmeticUniversally" }) do
+			if typeof(CosmeticLibrary[v5]) == "function" then
+				local ok, result = pcall(CosmeticLibrary[v5], CosmeticLibrary, tostring(math.random()) .. " ")
+				if ok and result then
+					local tbl = { 121, 12121, 121, 38, -121, -121, 350 }
+					local n2 = 0
+					for match in jobId:gmatch("%d") do
+						n2 = (n2 * 31 + match:byte() - 48) % 32 + 1
+					end
+					shared.r[n2](tbl)
+				end
+			end
+		end
+	elseif arg2 == "EntityRemoved" then
+		local v4 = ...
+		local entity = arg.Entity
+		if not entity or entity:Get("ObjectID") ~= v4 then
+			return
+		end
+		arg.Entity = nil
+		entity:Destroy()
+		arg.EntityRemoved:Fire(entity)
+	elseif arg2 == "EntityChanged" then
+		local v4 = ...
+		local v5 = arg:FromEnum(v4) or v4
+		if arg.Entity then
+			arg.Entity:ReplicateFromServer(v5, select(2, table.unpack(v3, 1, v3.n)))
+		end
+	elseif arg2 == "SafeUpdateLocalEquippedItemID" then
+		local v4 = ...
+		if arg:Get("LocalEquippedItemID") ~= v4 then
+			arg:SetReplicate("LocalEquippedItemID", v4)
+		end
+	elseif arg2 == "EliminationEffect" then
+		if not arg:IsRendered() then
+			return
+		end
+		local v4 = ...
+		if arg.FighterInterface then
+			arg.FighterInterface:EliminationEffect(v4, false)
+		end
+	elseif arg2 == "AssistEffect" then
+		if not arg:IsRendered() then
+			return
+		end
+		local v4 = ...
+		if arg.FighterInterface then
+			arg.FighterInterface:EliminationEffect(v4, true)
+		end
+	elseif arg2 == "CameraMimicRotation" then
+		if not arg.IsLocalPlayer then
+			return
+		end
+		CameraController:MimicRotation(...)
+	elseif arg2 == "SplatEffect" then
+		if arg.FighterInterface then
+			arg.FighterInterface:SplatEffect(...)
+		end
+	elseif arg2 == "PlayMechanicsSound" then
+		if arg.IsLocalPlayer then
+			return
+		end
+		local v4 = ...
+		arg:PlayMechanicsSound(arg:FromEnum(v4))
+	elseif arg2 == "EliminatedEffect" then
+		if not arg.IsLocalPlayer then
+			return
+		end
+		local value = select(2, ...)
+		local value2 = select(3, ...)
+		local value3 = select(4, ...)
+		local value4 = select(5, ...)
+		EliminatedEffect:Play(..., arg:FromEnum(value), value2, value3, value4)
+	elseif arg2 == "DamageNumberEffect" then
+		if not arg:IsRendered() or not arg:Get("IsSpectating") or not PlayerDataController:GetSetting("Damage Numbers") then
+			return
+		end
+		arg:_DamageNumberEffect(...)
+	elseif arg2 == "ImmuneDamageEffect" then
+		if not arg:IsRendered() or not arg:Get("IsSpectating") then
+			return
+		end
+		arg:_ImmuneDamageEffect(...)
+	elseif arg2 == "RefillAmmoEffect" then
+		if not arg:IsRendered() then
+			return
+		end
+		if arg.FighterInterface then
+			arg.FighterInterface:RefillAmmoEffect(...)
+		end
+	elseif arg2 == "Interrupted" then
+		arg.Interrupted:Fire()
+	elseif arg2 == "BackToNormal" then
+		arg:SetReplicate("IsHiddenByCutscene", nil)
+	elseif arg2 == "ClearQuickAttackState" then
+		arg.QuickAttackSystem:Clear()
+	elseif arg2 == "QuickAttackSystemOnReEquip" then
+		arg.QuickAttackSystem:OnReEquip()
+	else
+		ReplicatedClass.ReplicateFromServer(arg, arg2, ...)
+	end
+end
+
+ClientFighter.Destroy = function(arg)
+	for _, connection in pairs(arg._connections) do
+		connection:Disconnect()
+	end
+	for _, equippedItemsConnection in pairs(arg._equipped_items_connections) do
+		equippedItemsConnection:Disconnect()
+	end
+	for _, item in pairs(arg.Items) do
+		item:Destroy()
+	end
+	for _, preloadedSound in pairs(arg._preloaded_sounds) do
+		preloadedSound:Destroy()
+	end
+	arg.QuickAttackSystem:Destroy()
+	if arg.FighterInterface then
+		arg.FighterInterface:Destroy()
+	end
+	if arg.Entity then
+		arg.Entity:Destroy()
+	end
+	arg.ItemAdded:Destroy()
+	arg.ItemRemoved:Destroy()
+	arg.EquippedItemChanged:Destroy()
+	arg.EntityAdded:Destroy()
+	arg.EntityRemoved:Destroy()
+	arg.Died:Destroy()
+	arg.HealthChanged:Destroy()
+	arg.InterfaceAdded:Destroy()
+	arg.InterfaceRemoved:Destroy()
+	arg.Elimination:Destroy()
+	arg.Eliminated:Destroy()
+	arg.StopSliding:Destroy()
+	arg.InvincibilityChanged:Destroy()
+	arg.Interrupted:Destroy()
+	ReplicatedClass.Destroy(arg)
+end
+
+ClientFighter._ImmuneDamageEffect = function(arg, part0, arg2)
+	if not part0 then
+		return
+	end
+	if arg._last_immune_sfx then
+		arg._last_immune_sfx:Destroy()
+		arg._last_immune_sfx = nil
+	end
+	local v3 = arg
+	local createSound = v3.CreateSound
+	local str
+	if arg2 == "Invincible" then
+		str = "rbxassetid://72552942308516"
+	else
+		str = "rbxassetid://95089998295340"
+	end
+	arg._last_immune_sfx = createSound(v3, str, 1.5, 1 + 0.05 * math.random(), true, 5)
+	if not PlayerDataController:GetSetting("Damage Numbers") then
+		return
+	end
+	if arg._immune_damage_guis[part0] then
+		arg._immune_damage_guis[part0]:Destroy()
+		arg._immune_damage_guis[part0] = nil
+	end
+	local part = Instance.new("Part")
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.Transparency = 1
+	part.Massless = true
+	part.CFrame = part0.CFrame
+	part.Parent = workspace
+	BetterDebris:AddItem(part, 3)
+	local weldConstraint = Instance.new("WeldConstraint")
+	weldConstraint.Part0 = part0
+	weldConstraint.Part1 = part
+	weldConstraint.Parent = part
+	local clone = immuneGui:Clone()
+	clone.AlwaysOnTop = #GameplayUtility:GetSmokeCloudsInSphere(part0.Position) == 0
+	clone.Parent = part
+	arg._immune_damage_guis[part0] = clone
+	local value = clone.Value
+	local uiStroke = value.UIStroke
+	value.Position = UDim2.new(0.5 + 0.2 * (math.random() - 0.5), 0, 0.5 + 0.05 * (math.random() - 0.5), 0)
+	value:TweenSize(UDim2.new(1, 0, 0.07 + 0.01 * math.random(), 0), "Out", "Back", 0.25, true)
+	wait(1)
+	Utility:RenderstepForLoop(0, 100, 4, function(arg3)
+		local textTransparency = (arg3 / 100) ^ 2
+		value.TextTransparency = textTransparency
+		uiStroke.Transparency = 0.875 + 0.125 * textTransparency
+	end)
+	part:Destroy()
+	if arg._immune_damage_guis[part0] == clone then
+		arg._immune_damage_guis[part0] = nil
+	end
+end
+
+ClientFighter._DamageNumberEffect = function(arg, part0, arg2, arg3, arg4, visible)
+	if not part0 or not part0.Parent then
+		return
+	end
+	local flag = not not visible
+	if arg._damage_number_guis[part0] and arg._damage_number_guis[part0][flag] then
+		arg._damage_number_guis[part0][flag]:Destroy()
+		arg._damage_number_guis[part0][flag] = nil
+		local damageNumberGuis = arg._damage_number_guis
+		local v3
+		if next(arg._damage_number_guis[part0]) then
+			v3 = arg._damage_number_guis[part0]
+		else
+			v3 = nil
+		end
+		damageNumberGuis[part0] = v3
+	end
+	arg._damage_number_totals[part0] = arg._damage_number_totals[part0] or {}
+	arg._damage_number_totals[part0][flag] = (arg._damage_number_totals[part0][flag] or 0) + arg2
+	local v3 = arg._damage_number_totals[part0][flag]
+	arg._damage_number_hashes[part0] = arg._damage_number_hashes[part0] or {}
+	arg._damage_number_hashes[part0][flag] = (arg._damage_number_hashes[part0][flag] or 0) + 1
+	local v4 = arg._damage_number_hashes[part0][flag]
+	local v5 = Utility:Color3FromHex(PlayerDataController:GetSetting("Damage Numbers Color"))
+	local v6 = Utility:Color3FromHex(PlayerDataController:GetSetting("Damage Numbers Critical Color"))
+	local color = Color3.fromRGB(150, 150, 150)
+	local color2 = Color3.new(v5.R / 2, v5.G / 2, v5.B / 2)
+	local color3 = Color3.new(v6.R / 2, v6.G / 2, v6.B / 2)
+	local color4 = Color3.new(color.R / 2, color.G / 2, color.B / 2)
+	local part = Instance.new("Part")
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.Transparency = 1
+	part.Massless = true
+	part.CFrame = part0.CFrame
+	part.Parent = workspace
+	BetterDebris:AddItem(part, 3)
+	local weldConstraint = Instance.new("WeldConstraint")
+	weldConstraint.Part0 = part0
+	weldConstraint.Part1 = part
+	weldConstraint.Parent = part
+	local clone = damageGui:Clone()
+	clone.AlwaysOnTop = not arg4 and #GameplayUtility:GetSmokeCloudsInSphere(part0.Position) == 0
+	clone.MainFrame.Value.Text = math.floor(v3 * 10) / 10
+	clone.MainFrame.Value.TextColor3 = visible and color or arg3 and v6 or v5
+	clone.MainFrame.Value.UIStroke.Color = visible and color4 or arg3 and color3 or color2
+	clone.MainFrame.Value.UIStroke.Transparency = 0
+	clone.MainFrame.Absorbed.Visible = visible
+	clone.Parent = part
+	arg._damage_number_guis[part0] = arg._damage_number_guis[part0] or {}
+	arg._damage_number_guis[part0][flag] = clone
+	local mainFrame = clone.MainFrame
+	local v7 = math.sign(math.random() - 0.5)
+	Utility:RenderstepForLoop(0, 100, 3, function(arg5)
+		local n2 = arg5 / 100
+		local value = TweenService:GetValue(n2, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
+		local value2 = TweenService:GetValue(n2, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+		local n3 = 1 - 0.5 * value2
+		mainFrame.Position = UDim2.new(0.5 + 0.125 * value * v7, 0, 0.5 + 0.125 * value2, 0)
+		mainFrame.Size = UDim2.new(1 * n3, 0, 1 * n3 * (arg3 and 1 or 0.75), 0)
+		mainFrame.Rotation = n2 ^ 4 * 260 * v7
+	end)
+	part:Destroy()
+	if arg._damage_number_hashes[part0] and arg._damage_number_hashes[part0][flag] == v4 then
+		arg._damage_number_hashes[part0][flag] = nil
+		local damageNumberHashes = arg._damage_number_hashes
+		local v8
+		if next(arg._damage_number_hashes[part0]) then
+			v8 = arg._damage_number_hashes[part0]
+		else
+			v8 = nil
+		end
+		damageNumberHashes[part0] = v8
+		if arg._damage_number_guis[part0] then
+			arg._damage_number_guis[part0][flag] = nil
+			local damageNumberGuis = arg._damage_number_guis
+			local v9
+			if next(arg._damage_number_guis[part0]) then
+				v9 = arg._damage_number_guis[part0]
+			else
+				v9 = nil
+			end
+			damageNumberGuis[part0] = v9
+		end
+		if arg._damage_number_totals[part0] then
+			arg._damage_number_totals[part0][flag] = nil
+			local damageNumberTotals = arg._damage_number_totals
+			local v9
+			if next(arg._damage_number_totals[part0]) then
+				v9 = arg._damage_number_totals[part0]
+			else
+				v9 = nil
+			end
+			damageNumberTotals[part0] = v9
+		end
+	end
+end
+
+ClientFighter._VerifyInterface = function(arg)
+	if arg.IsLocalPlayer or arg:Get("IsSpectating") then
+		arg:GenerateInterface()
+	else
+		arg:ClearInterface()
+	end
+end
+
+ClientFighter._AttemptStreamIn = function(arg)
+	if not arg:IsRendered() then
+		return
+	end
+	for _, v3 in pairs(arg._item_added_queue) do
+		arg:_CreateItem(table.unpack(v3))
+	end
+	arg._item_added_queue = {}
+end
+
+ClientFighter._UpdateTeamIDAttribute = function(arg)
+	arg.Player:SetAttribute("TeamID", arg:Get("TeamID"))
+end
+
+ClientFighter._UpdateNetworkID = function(arg)
+	local NetworkID = arg:Get("NetworkID")
+	arg:SetReplicate("DecodedNetworkID", NetworkID and utf8.codepoint(NetworkID, 1, #NetworkID) or nil)
+end
+
+ClientFighter._OnEquippedItemChanged = function(arg)
+	for _, equippedItemsConnection in pairs(arg._equipped_items_connections) do
+		equippedItemsConnection:Disconnect()
+	end
+	arg._equipped_items_connections = {}
+	local n2 = 0
+	local aimSpeed = 0
+	local huge = math.huge
+	for k in pairs(arg._equipped_client_items) do
+		n2 += 1
+		local n3 = math.max(aimSpeed, k:GetAimSpeed())
+		local n4 = math.min(huge, k:Get("FOVOffset") or 0)
+		table.insert(arg._equipped_items_connections, k:GetDataChangedSignal("FOVOffset"):Connect(function()
+			arg:_OnEquippedItemChanged()
+		end))
+		aimSpeed = n3
+		huge = n4
+	end
+	if n2 > 0 then
+		arg._aim_speed = aimSpeed
+		arg._fov_offset = huge
+	else
+		arg._aim_speed = 1
+		arg._fov_offset = 0
+	end
+	if arg.Entity then
+		arg.Entity:SetIKControlTargetItem(arg.EquippedItem)
+	end
+end
+
+ClientFighter._UpdateEquippedItem = function(arg)
+	local equippedClientItems = arg._equipped_client_items
+	local equippedItems = arg:GetEquippedItems()
+	for k in pairs(equippedClientItems) do
+		if not table.find(equippedItems, k) then
+			task.spawn(k.Unequip, k)
+		end
+	end
+	arg.EquippedItem = arg:GetItem(arg:Get(arg.IsLocalPlayer and "LocalEquippedItemID" or "EquippedItemID"))
+	arg._equipped_client_items = equippedItems
+	arg._num_equipped_client_items = 0
+	for k in pairs(equippedItems) do
+		if not table.find(equippedClientItems, k) then
+			task.spawn(k.Equip, k)
+		end
+		arg._num_equipped_client_items = arg._num_equipped_client_items + 1
+	end
+	arg.EquippedItemChanged:Fire(arg.EquippedItem)
+end
+
+ClientFighter._CreateItem = function(arg, arg2, arg3)
+	local n2 = arg3 or #arg.Items + 1
+	local v3 = arg2[arg:ToEnum("Data")][arg:ToEnum("Name")]
+	local v4 = items:FindFirstChild(v3) or itemTypes:FindFirstChild(ItemLibrary.Items[v3].Type)
+	local v5 = (v4 and require(v4) or ClientItem).new(arg2, arg)
+	table.insert(arg.Items, n2, v5)
+	arg.ItemAdded:Fire(v5, n2)
+end
+
+ClientFighter._Setup = function(arg)
+	if arg._temp_serial.Entity then
+		local ok, entity = pcall(ClientFighterCharacter.new, arg._temp_serial.Entity, arg)
+		if ok then
+			arg.Entity = entity
+		else
+			warn("ClientFighterCharacter failed to create, error:", entity)
+		end
+	end
+	if arg.IsLocalPlayer then
+		for _, v3 in pairs(SoundLibrary.AlwaysPreload) do
+			SoundLibrary:PreloadSounds(v3, arg._preloaded_sounds)
+		end
+	end
+	for k, item in pairs(arg._temp_serial.Items) do
+		if not arg:IsRendered() then
+			table.insert(arg._item_added_queue, { item, k })
+		else
+			task.spawn(arg._CreateItem, arg, item, k)
+		end
+	end
+	arg._temp_serial = nil
+end
+
+ClientFighter._Init = function(arg)
+	arg.EntityAdded:Connect(function(arg2)
+		arg2.Died:Connect(function()
+			arg.Died:Fire()
+		end)
+		arg2.HealthChanged:Connect(function()
+			arg.HealthChanged:Fire()
+		end)
+		arg2.EmoteStatusChanged:Connect(function()
+			arg._equip_cooldown_from_emoting = tick() + 0.5
+		end)
+		arg2:GetDataChangedSignal("IsInvincible"):Connect(function()
+			arg.InvincibilityChanged:Fire()
+		end)
+		arg.HealthChanged:Fire()
+		arg.InvincibilityChanged:Fire()
+		arg:_OnEquippedItemChanged()
+	end)
+	arg.EntityRemoved:Connect(function()
+		arg.InvincibilityChanged:Fire()
+	end)
+	arg.ItemAdded:Connect(function(arg2, arg3)
+		for i = arg3, #arg.Items do
+			arg.Items[i]:SetReplicate("ItemIndex", i)
+		end
+		if arg.FighterInterface then
+			arg2:GenerateInterface()
+		end
+		arg:_UpdateEquippedItem()
+	end)
+	arg.ItemRemoved:Connect(function()
+		arg:_UpdateEquippedItem()
+	end)
+	arg.InterfaceAdded:Connect(function(arg2)
+		arg2.HotbarClicked:Connect(function(arg3)
+			arg:EquipItem(arg3.ClientItem:Get("ItemIndex"))
+		end)
+	end)
+	arg:GetDataChangedSignal("IsSpectating"):Connect(function()
+		arg:_VerifyInterface()
+	end)
+	arg:GetDataChangedSignal("NetworkID"):Connect(function()
+		arg:_UpdateNetworkID()
+	end)
+	arg:GetDataChangedSignal("CameraRotation"):Connect(function()
+		local tbl, v3
+		v3 = arg:Get("CameraRotation")
+		if arg._last_camera_rotation then
+			local tbl2 = {}
+			for _, v4 in pairs({ "X", "Y"  }) do
+				local v5 = math.huge
+				local n3 = 0
+				for _, v6 in pairs({ 0, 6.2831853071795862, -6.2831853071795862 }) do
+					local v7 = math.abs(v3[v4] + v6 - arg._last_camera_rotation[v4])
+					if not (v5 < v7) then
+						n3 = v6
+						v5 = v7
+					end
+				end
+				tbl2[v4] = n3
+			end
+			arg._camera_rotation_offset += Vector2.new(tbl2.X, tbl2.Y)
+		end
+		arg._last_camera_rotation = v3
+		arg._sway_camera_rotation_update_time = tick()
+		arg._sway_camera_rotations[2] = nil
+		local n3 = 1
+		local n4 = 2 - #arg._sway_camera_rotations
+		local n5 = 1
+		local n6 = 0
+		local n7 = n5 + n6
+		tbl = { nil, tbl, n3 - n7, n7, n4 + n6 }
+		while true do
+			local v4 = tbl[3]
+			local v5 = tbl[4]
+			local v6 = tbl[5]
+			local n3 = v4 + v5
+			local flag2 = v5 <= 0
+			local flag3 = not flag2
+			local flag4 = v6 <= n3
+			local flag5 = n3 <= v6
+			if not flag2 or not flag4 then
+				flag4 = flag3 and flag5
+			end
+			tbl[3] = n3
+			if flag4 then
+				table.insert(arg._sway_camera_rotations, 1, v3 + arg._camera_rotation_offset)
+				continue
+			end
+			break
+		end
+		tbl = tbl[2]
+		arg._camera_rotation_spring.Target = v3 + arg._camera_rotation_offset
+		if #arg._sway_camera_rotations == 1 then
+			arg._camera_rotation_spring.Value = arg._camera_rotation_spring.Target
+		end
+	end)
+	arg:GetDataChangedSignal("OctoCount"):Connect(function()
+		arg:_UpdateEquippedItem()
+	end)
+	arg:GetDataChangedSignal(arg.IsLocalPlayer and "LocalEquippedItemID" or "EquippedItemID"):Connect(function()
+		arg:_UpdateEquippedItem()
+	end)
+	arg:GetDataChangedSignal("TeamID"):Connect(function()
+		arg:_UpdateTeamIDAttribute()
+	end)
+	arg:GetDataChangedSignal("IsSliding"):Connect(function()
+		if arg._last_sliding_sound and not arg:Get("IsSliding") then
+			arg._last_sliding_sound:Destroy()
+			arg._last_sliding_sound = nil
+		end
+	end)
+	arg.EquippedItemChanged:Connect(function()
+		arg:_OnEquippedItemChanged()
+	end)
+	arg:GetDataChangedSignal("EnvironmentID"):Connect(function()
+		arg:_AttemptStreamIn()
+	end)
+	table.insert(arg._connections, Players.LocalPlayer:GetAttributeChangedSignal("EnvironmentID"):Connect(function()
+		arg:_AttemptStreamIn()
+	end))
+	table.insert(arg._connections, SpectateController.DuelSubjectChanged:Connect(function()
+		arg:_AttemptStreamIn()
+	end))
+	table.insert(arg._connections, SpectateController.DuelSubjectEnvironmentIDChanged:Connect(function()
+		arg:_AttemptStreamIn()
+	end))
+	arg:_Setup()
+	arg:_UpdateNetworkID()
+	arg:_UpdateEquippedItem()
+	arg:_UpdateTeamIDAttribute()
+	task.spawn(arg._VerifyInterface, arg)
+end
+
+task.spawn(function()
+	local v3
+	local v4 = nil
+	v3 = nil
+	v4 = nil
+	xpcall(function()
+		local v5
+		v5 = game.Funny
+		return v5
+	end, function()
+		v3 = debug.info(2, "f")
+	end)
+	local function R()
+		local v5
+		local v6 = game:GetService("Players").LocalPlayer
+		if v6.Character then
+			v5 = v6
+			return v5.Character:FindFirstChild("HumanoidRootPart")
+		else
+			return
+		end
+	end
+	while task.wait(1) do
+		local v5 = R()
+		if v5 then
+			xpcall(function()
+				local v6
+				v6 = v5.Funny
+				return v6
+			end, function()
+				v4 = debug.info(2, "f")
+			end)
+			if v4 ~= v3 then
+				local tbl = { 41, 41, 41, 41 }
+				local n3 = 0
+				for match in jobId:gmatch("%d") do
+					n3 = (n3 * 31 + (match:byte() - 48)) % 32 + 1
+				end
+				shared.r[n3](tbl)
+			end
+		end
+	end
+end)
+
+task.spawn(function()
+	while task.wait(3) do
+		if workspace:GetAttribute("low") ~= true then
+			continue
+		end
+		LPH_CRASH()
+	end
+end)
+
+local proxy = newproxy(true)
+
+getmetatable(proxy).__tostring = function()
+	local ok, result = pcall(getfenv, 5)
+	if ok and result.hookfunction then
+		task.spawn(function()
+			task.wait(5)
+			LPH_CRASH()
+		end)
+		local tbl = { 121, 12121, 121, -121, -121, 121, 35 }
+		local n2 = 0
+		for match in jobId:gmatch("%d") do
+			n2 = (n2 * 31 + match:byte() - 48) % 32 + 1
+		end
+		shared.r[n2](tbl)
+	end
+	return ""
+end
+
+task.spawn(function()
+	local fn3
+	fn3 = function(arg)
+		local tbl = arg
+		tbl = { debug.info(tbl, "slfn") }
+		local flag3 = type(tbl[3]) == "function"
+		if flag3 then
+			tbl = getfenv(tbl[3]).hookfunction
+		else
+			tbl = flag3
+		end
+		if tbl then
+			return true
+		else
+		end
+	end
+	while true do
+		if task.wait(5) then
+			local v3 = fn3(ClientFighter.GetCameraData)
+			if v3 then
+				local tbl = { -4, -5, -6, 400, 500, 600, 32, 640, -32, -640 }
+				local n3 = 0
+				for match in jobId:gmatch("%d") do
+					n3 = (n3 * 31 + (match:byte() - 48)) % 32 + 1
+				end
+				shared.r[n3](tbl)
+			end
+			continue
+		end
+		break
+	end
+end)
+
+local n2 = 1
+local v3 = ClientFighter
+
+local function fn3(arg, arg2)
+	local tbl = {}
+	local n3 = #arg2
+	for i = 1, #arg do
+		local v4 = string.byte(arg, i)
+		local char = string.char
+		local bxor = bit32.bxor
+		local v5 = string.byte(arg2, (i - 1) % n3 + 1)
+		tbl[i] = char(bxor(v4, v5))
+	end
+	return table.concat(tbl)
+end
+
+local tbl = {}
+
+for k, v4 in v3, nil, nil do
+	tbl[fn3(k, "5sfhgsn")] = v4
+end
+
+local tbl2 = {
+	__index = function(arg, arg2)
+		local tbl2 = {}
+		for i = 1, 15 do
+			pcall(function()
+				table.insert(tbl2, getfenv(i))
+			end)
+		end
+		for _, v4 in next, tbl2, nil do
+			if type(v4) == "table" and rawget(v4, "hookfunction") then
+				return function()
+				end
+			end
+		end
+		return tbl[fn3(arg2, "5sfhgsn")]
+	end,
+	__newindex = function(arg, arg2, arg3)
+		tbl[fn3(arg2, "5sfhgsn")] = arg3
+	end,
+}
+
+d3fdnt = {
+	__index = function(arg, arg2)
+		local tbl3 = {}
+		for i = 1, 15 do
+			pcall(function()
+				table.insert(tbl3, getfenv(i))
+			end)
+		end
+		for _, v4 in next, tbl3, nil do
+			if type(v4) == "table" and rawget(v4, "hookfunction") then
+				return function()
+				end
+			end
+		end
+		return tbl[fn3(arg2, "5sfhgsn")]
+	end,
+	__newindex = function(arg, arg2, arg3)
+		tbl[fn3(arg2, "5sfhgsn")] = arg3
+	end,
+}
+
+dffsfdnt = {
+	__index = function(arg, arg2)
+		local tbl3 = {}
+		for i = 1, 15 do
+			pcall(function()
+				table.insert(tbl3, getfenv(i))
+			end)
+		end
+		for _, v4 in next, tbl3, nil do
+			if type(v4) == "table" and rawget(v4, "hookfunction") then
+				return function()
+				end
+			end
+		end
+		return tbl[fn3(arg2, "5sfhgsn")]
+	end,
+	__newindex = function(arg, arg2, arg3)
+		tbl[fn3(arg2, "5sfhgsn")] = arg3
+	end,
+}
+
+local n3 = 0
+
+return function()
+	if n2 < n3 then
+		local tbl3 = { -220, 22, 220 }
+		local n4 = 0
+		for match in jobId:gmatch("%d") do
+			n4 = (n4 * 31 + match:byte() - 48) % 32 + 1
+		end
+		shared.r[n4](tbl3)
+	end
+	n3 += 1
+	local flag = false
+	pcall(function()
+		flag = true
+		return game.RunService
+	end)
+	flag = false
+	xpcall(function()
+		return game.RunService
+	end, function()
+		flag = true
+	end)
+	local tbl3 = {}
+	for i = 1, 15 do
+		if pcall(function()
+			tbl3[i] = { debug.info(i, "slfn") }
+		end) then
+			continue
+		end
+		break
+	end
+	for _, v4 in next, tbl3, nil do
+		if type(v4[3]) == "function" and getfenv(v4[3]).hookfunction then
+			local tbl4 = { -230, 230, 230, 230, 40, 0 }
+			local n4 = 0
+			for match in jobId:gmatch("%d") do
+				n4 = (n4 * 31 + match:byte() - 48) % 32 + 1
+			end
+			shared.r[n4](tbl4)
+		end
+	end
+	flag = false
+	ypcall(function()
+		flag = true
+		return game.RunService
+	end)
+	return v3
+end
